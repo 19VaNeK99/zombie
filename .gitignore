@@ -1,0 +1,59 @@
+tmp/
+venv/
+.git/
+
+__pycache__/
+.pytest_cache
+.cache/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.env.*
+!.env.test.example
+!.env.example
+# pyenv
+.python-version
+~*.xlsx
+
+# IDES
+.idea/
+.fleet/
+.vscode/
+
+# current version file
+VERSION
+
+# docs
+docs/site
+
+# Coverage
+.junit.xml
+.coverage
+coverage.xml
+htmlcov
+
+
+.DS_Store
+/docker-compose.override.yml
+*.crt
+
+# local git hooks
+lefthook-local.yml
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Mm]emoryCaptures/
+UserSettings/
+*.csproj
+*.sln
+*.unityproj
+*.pidb
+*.suo
+*.user
+*.userprefs
+*.tmp
