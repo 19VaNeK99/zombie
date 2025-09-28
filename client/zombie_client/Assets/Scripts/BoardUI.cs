@@ -3,42 +3,87 @@ using UnityEngine;
 
 public class BoardUI : MonoBehaviour
 {
-    [Tooltip("Фишка, которую будем перемещать между ячейками")]
-    [SerializeField] private RectTransform token;
+    [Header("Tokens")]
+    [SerializeField] private RectTransform botToken;     // фишка бота (с сервера)
+    [SerializeField] private RectTransform playerToken;  // фишка игрока (локально)
 
-    // Ячейки будут автоматически собраны из детей Board (Cell1..Cell9) в порядке иерархии
-    private readonly List<RectTransform> _cells = new();
+    private readonly List<RectTransform> _cells = new(); // Cell1..Cell9 (по порядку)
+    private int _botCell = 5;      // текущее положение бота (1..9)
+    private int _playerCell = 5;   // текущее положение игрока (1..9)
 
     private void Awake()
     {
-        // Собираем всех непосредственных детей Board, кроме Token
         _cells.Clear();
         for (int i = 0; i < transform.childCount; i++)
         {
             var child = transform.GetChild(i) as RectTransform;
             if (child == null) continue;
-            if (child == token) continue;     // пропускаем Token
+
+            // собираем только клетки (исключаем токены, если они уже лежат внутри Board)
+            if (child == botToken || child == playerToken) continue;
             _cells.Add(child);
         }
 
-        // На всякий случай убедимся, что 9 клеток
         if (_cells.Count != 9)
             Debug.LogWarning($"BoardUI: найдено {_cells.Count} клеток, ожидается 9.");
+
+        // стартовые позиции по центру (клетка 5)
+        MoveTokenToCell(botToken, _botCell);
+        MoveTokenToCell(playerToken, _playerCell);
     }
 
-    /// <summary>
-    /// Перемещает фишку в клетку по номеру 1..9.
-    /// 1 — верхний левый угол, 3 — верхний правый, 9 — нижний правый (row-major).
-    /// </summary>
-    public void MoveTokenToCell(int cellNumber)
+    // ========== Публичные методы ==========
+
+    /// <summary>Движение бота по номеру клетки 1..9 (из сервера).</summary>
+    public void MoveBotToCell(int cellNumber)
     {
-        if (token == null) { Debug.LogWarning("BoardUI: Token не назначен"); return; }
-        if (cellNumber < 1 || cellNumber > _cells.Count) { Debug.LogWarning($"Неверный номер клетки: {cellNumber}"); return; }
-
-        var targetCell = _cells[cellNumber - 1];
-
-        // Делает Token дочерним объектом целевой ячейки и ставит по центру
-        token.SetParent(targetCell, worldPositionStays: false);
-        token.anchoredPosition = Vector2.zero;
+        _botCell = ClampCell(cellNumber);
+        MoveTokenToCell(botToken, _botCell);
     }
+
+    /// <summary>Переместить игрока в конкретную клетку 1..9 (если захочешь клики).</summary>
+    public void MovePlayerToCell(int cellNumber)
+    {
+        _playerCell = ClampCell(cellNumber);
+        MoveTokenToCell(playerToken, _playerCell);
+    }
+
+    /// <summary>Сдвинуть игрока на dx,dy по сетке (dx: -1..1 колонка, dy: -1..1 строка).</summary>
+    public void MovePlayerByDelta(int dx, int dy)
+    {
+        var (r, c) = ToRC(_playerCell);
+        r += dy; c += dx;
+        r = Mathf.Clamp(r, 0, 2);
+        c = Mathf.Clamp(c, 0, 2);
+        _playerCell = FromRC(r, c);
+        MoveTokenToCell(playerToken, _playerCell);
+    }
+
+    // ========== Вспомогательные ==========
+
+    private void MoveTokenToCell(RectTransform token, int cellNumber)
+    {
+        if (token == null) return;
+        int idx = cellNumber - 1;
+        if (idx < 0 || idx >= _cells.Count) return;
+
+        var target = _cells[idx];
+        token.SetParent(target, worldPositionStays: false);
+        token.anchoredPosition = Vector2.zero; // по центру клетки
+    }
+
+    private static (int r, int c) ToRC(int cell)   // 1..9 -> (row, col)
+    {
+        int i = Mathf.Clamp(cell, 1, 9) - 1;
+        return (i / 3, i % 3);
+    }
+
+    private static int FromRC(int r, int c)        // (row, col) -> 1..9
+    {
+        r = Mathf.Clamp(r, 0, 2);
+        c = Mathf.Clamp(c, 0, 2);
+        return r * 3 + c + 1;
+    }
+
+    private static int ClampCell(int cell) => Mathf.Clamp(cell, 1, 9);
 }
