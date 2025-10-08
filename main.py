@@ -17,6 +17,8 @@ ITEM_COUNTS = {
     ItemType.ZOMBIE: 3,
     ItemType.MEDKIT: 2,
     ItemType.WEAPON: 2,
+    ItemType.KEY: 1,
+    ItemType.FUEL: 1,
 }
 
 # --- Новые параметры автосмерти/опасности ---
@@ -307,7 +309,21 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
                 finished_now = False
                 if logic.is_finish_cell(player.cell):
-                    finished_now = logic.mark_player_finished(player)
+                    finish_result = logic.mark_player_finished(player)
+                    finished_now = finish_result.finished
+                    if finish_result.inventory_changed:
+                        await send_json(
+                            websocket, {"t": "inventory", "items": player.inventory_snapshot()}
+                        )
+                    if finish_result.reason and not finish_result.finished:
+                        await send_json(
+                            websocket,
+                            {
+                                "t": "error",
+                                "code": finish_result.reason,
+                                "reason": finish_result.reason,
+                            },
+                        )
 
                 await broadcast_player_snapshot(player)
 

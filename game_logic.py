@@ -1,5 +1,6 @@
 import random
 from enum import Enum
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from domain import GameMap, Item, ItemResolution, ItemType, Player
@@ -8,6 +9,13 @@ from domain import GameMap, Item, ItemResolution, ItemType, Player
 class GamePhase(str, Enum):
     LOBBY = "lobby"
     PLAYING = "playing"
+
+
+@dataclass(frozen=True)
+class PlayerFinishResult:
+    finished: bool
+    inventory_changed: bool = False
+    reason: Optional[str] = None
 
 
 class GameState:
@@ -58,6 +66,8 @@ class GameLogic:
         self.state = GameState()
         self.game_map = GameMap(grid_size, item_counts, rng=rng)
         self.players: Dict[str, Player] = {}
+        self.door_unlocked = False
+        self.finish_required_items: Tuple[str, ...] = ("key", "fuel")
 
     # ------------------------------------------------------------------
     # Special cells
@@ -142,6 +152,7 @@ class GameLogic:
 
     def restart_game(self) -> List[Player]:
         self.game_map.reset()
+        self.door_unlocked = False
 
         occupied: Set[int] = set()
         for player in sorted(self.players.values(), key=lambda p: p.id):
@@ -154,6 +165,7 @@ class GameLogic:
         return list(self.players.values())
 
     def start_game(self) -> None:
+        self.door_unlocked = False
         self.state.active = True
         self.state.phase = GamePhase.PLAYING
         self.state.turn_order = []
@@ -241,11 +253,28 @@ class GameLogic:
             "order": list(self.state.turn_order),
         }
 
-    def mark_player_finished(self, player: Player) -> bool:
+    def can_player_finish(self, player: Player) -> bool:
+        if self.door_unlocked:
+            return True
+        inventory = set(player.inventory)
+        return all(item in inventory for item in self.finish_required_items)
+
+    def mark_player_finished(self, player: Player) -> PlayerFinishResult:
         if player.finished:
-            return False
+            return PlayerFinishResult(finished=False, reason="already_finished")
+
+        if not self.can_player_finish(player):
+            return PlayerFinishResult(finished=False, reason="missing_items")
+
+        inventory_changed = False
+        if not self.door_unlocked:
+            for item in self.finish_required_items:
+                removed = player.remove_item(item)
+                inventory_changed = inventory_changed or removed
+            self.door_unlocked = True
+
         player.finished = True
-        return True
+        return PlayerFinishResult(finished=True, inventory_changed=inventory_changed)
 
     def all_players_resolved(self) -> bool:
         if not self.players:
@@ -269,4 +298,4 @@ class GameLogic:
         return True
 
 
-__all__ = ["GameLogic", "GamePhase", "GameState"]
+__all__ = ["PlayerFinishResult", "GameLogic", "GamePhase", "GameState"]

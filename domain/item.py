@@ -14,6 +14,8 @@ class ItemType(str, Enum):
     ZOMBIE = "zombie"
     MEDKIT = "medkit"
     WEAPON = "weapon"
+    KEY = "key"
+    FUEL = "fuel"
 
     @classmethod
     def from_string(cls, value: str) -> "ItemType":
@@ -52,7 +54,7 @@ class Item:
         if self.item_type is ItemType.MEDKIT:
             healed = player.heal(MEDKIT_HEAL)
             return ItemResolution(healed=healed, died=not player.alive)
-        if self.item_type is ItemType.WEAPON:
-            player.add_item("weapon")
-            return ItemResolution(inventory_added="weapon", died=not player.alive)
+        if self.item_type in (ItemType.WEAPON, ItemType.KEY, ItemType.FUEL):
+            collected = player.collect_item(self.item_type)
+            return ItemResolution(inventory_added=collected, died=not player.alive)
         raise ValueError(f"Unsupported item type: {self.item_type}")
