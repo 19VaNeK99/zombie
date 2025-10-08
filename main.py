@@ -91,6 +91,7 @@ async def send_full_state(player: Player) -> None:
         "game_phase": logic.state.phase.value,
         "joinable": logic.state.phase is GamePhase.LOBBY,
         "players": [p.to_public() for p in logic.list_players()],
+        "turn": logic.turn_snapshot(),
     }
     await send_json(ws, payload)
 
@@ -137,9 +138,14 @@ async def broadcast_player_finish(player: Player) -> None:
     await broadcast_json({"t": "finish", "id": player.id, "cell": player.cell})
 
 
+async def broadcast_turn_info() -> None:
+    await broadcast_json({"t": "turn", **logic.turn_snapshot()})
+
+
 async def finalize_game_if_needed(*, trigger: Optional[Player] = None) -> None:
     if logic.finalize_if_complete():
         await broadcast_game_status("completed", by=trigger.id if trigger else None)
+        await broadcast_turn_info()
 
 
 async def apply_life_change(player: Player, amount: int) -> bool:
@@ -204,6 +210,7 @@ async def perform_restart(requester: Optional[Player] = None) -> None:
     await broadcast_players_list()
 
     await broadcast_game_status("ready", by=requester.id if requester else None)
+    await broadcast_turn_info()
 
 
 # ===================== WebSocket =====================
@@ -264,6 +271,20 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     await notify_game_inactive(websocket)
                     continue
 
+                if not logic.is_player_turn(player):
+                    await send_json(
+                        websocket,
+                        {"t": "error", "code": "not_your_turn", "reason": "not_your_turn"},
+                    )
+                    continue
+
+                async def conclude_move(force_end: bool, *, remove_from_turn: bool) -> None:
+                    if logic.state.active:
+                        logic.consume_step(player, force_end=force_end)
+                    if remove_from_turn:
+                        logic.handle_player_inactive(player)
+                    await broadcast_turn_info()
+
                 dx = int(msg.get("dx", 0))
                 dy = int(msg.get("dy", 0))
 
@@ -296,6 +317,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     if player.alive and logic.should_trigger_hazard():
                         died = await apply_life_change(player, logic.hazard_damage)
                         if died:
+                            await conclude_move(force_end=True, remove_from_turn=True)
                             await finalize_game_if_needed(trigger=player)
                             continue
 
@@ -303,17 +325,22 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     if finished_now:
                         await broadcast_player_finish(player)
                         await broadcast_players_list()
+                        await conclude_move(force_end=True, remove_from_turn=True)
                         await finalize_game_if_needed(trigger=player)
                         continue
                     died_from_item = await handle_cell_item(player)
                     if died_from_item:
+                        await conclude_move(force_end=True, remove_from_turn=True)
                         await finalize_game_if_needed(trigger=player)
                         continue
                     if player.finished:
                         await broadcast_players_list()
                         await broadcast_player_finish(player)
+                        await conclude_move(force_end=True, remove_from_turn=True)
                         await finalize_game_if_needed(trigger=player)
                         continue
+
+                await conclude_move(force_end=False, remove_from_turn=False)
 
             elif mtype == "damage":
                 if not logic.state.active:
@@ -322,6 +349,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 amount = int(msg.get("amount", 0))
                 died = await apply_life_change(player, amount)
                 if died:
+                    if logic.state.active and logic.is_player_turn(player):
+                        logic.consume_step(player, force_end=True, spend=False)
+                    logic.handle_player_inactive(player)
+                    await broadcast_turn_info()
                     await finalize_game_if_needed(trigger=player)
 
             elif mtype == "pickup":
@@ -361,6 +392,9 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         elif pl.finished:
                             await broadcast_players_list()
                             await broadcast_player_finish(pl)
+                if logic.state.active:
+                    logic.start_turn_cycle()
+                await broadcast_turn_info()
                 await finalize_game_if_needed(trigger=player)
 
             elif mtype == "restart":
@@ -374,3 +408,4 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             logic.remove_player(stored_player.id)
             player_connections.pop(stored_player.id, None)
             await broadcast_players_list()
+            await broadcast_turn_info()
