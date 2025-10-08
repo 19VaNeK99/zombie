@@ -24,6 +24,17 @@ class GameMap:
         self.reset_items()
 
     # ------------------------------------------------------------------
+    # Special cells
+    # ------------------------------------------------------------------
+    def spawn_cell(self) -> int:
+        """Return the dedicated spawn cell (bottom-left corner)."""
+        return self.from_rc(self.size - 1, 0)
+
+    def finish_cell(self) -> int:
+        """Return the dedicated finish cell (top-right corner)."""
+        return self.from_rc(0, self.size - 1)
+
+    # ------------------------------------------------------------------
     # Geometry helpers
     # ------------------------------------------------------------------
     @property
@@ -87,33 +98,17 @@ class GameMap:
     # ------------------------------------------------------------------
     def first_free_start_cell(self, occupied: Iterable[int]) -> int:
         occupied_set = set(occupied)
-        start = self.center_cell()
-        if start not in occupied_set:
-            return start
-
-        r0, c0 = self.to_rc(start)
-        for radius in range(1, self.size):
-            for dr in range(-radius, radius + 1):
-                for dc in range(-radius, radius + 1):
-                    r, c = r0 + dr, c0 + dc
-                    if r < 0 or r >= self.size or c < 0 or c >= self.size:
-                        continue
-                    candidate = self.from_rc(r, c)
-                    if candidate not in occupied_set:
-                        return candidate
-
-        for idx in range(1, self.total_cells + 1):
-            if idx not in occupied_set:
-                return idx
-
-        return self.center_cell()
+        # Игроки всегда появляются в одной стартовой точке, поэтому занятость
+        # остальных игроков не учитывается.
+        return self.spawn_cell()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _generate_items(self) -> Dict[int, Item]:
         total_cells = self.total_cells
-        available_cells = [cell for cell in range(1, total_cells + 1) if cell != self.center_cell()]
+        forbidden = {self.center_cell(), self.spawn_cell(), self.finish_cell()}
+        available_cells = [cell for cell in range(1, total_cells + 1) if cell not in forbidden]
         placements: Dict[int, Item] = {}
 
         for item_type, count in self._item_counts.items():
