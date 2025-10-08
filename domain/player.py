@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .item import ItemType
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,16 @@ class Player:
     # ------------------------------------------------------------------
     def add_item(self, item: str) -> None:
         self._inventory.append(item)
+
+    def collect_item(self, item_type: "ItemType") -> Optional[str]:
+        """Collects a map item and stores it in the inventory if supported."""
+
+        item_value = getattr(item_type, "value", str(item_type))
+        if item_value not in {"weapon", "key", "fuel"}:
+            return None
+
+        self.add_item(item_value)
+        return item_value
 
     def remove_item(self, item: str) -> bool:
         try:
