@@ -1,6 +1,6 @@
 import random
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from domain import GameMap, Item, ItemResolution, ItemType, Player
@@ -143,11 +143,27 @@ class GameLogic:
             player.heal(-amount)
         return died
 
-    def resolve_cell_item(self, player: Player) -> Optional[Tuple[Item, ItemResolution]]:
+    def resolve_cell_item(
+        self,
+        player: Player,
+        *,
+        occupied: Optional[Set[int]] = None,
+    ) -> Optional[Tuple[Item, ItemResolution]]:
         item = self.game_map.take_item(player.cell)
         if not item:
             return None
         result = item.apply(player)
+        if item.item_type is ItemType.ZOMBIE:
+            if result.damage > 0 and not result.inventory_removed and not result.died:
+                occupied_cells = set(occupied) if occupied is not None else self.occupied_cells(exclude_player_id=player.id)
+                target = self.game_map.nearest_revealed_cell(
+                    player.cell,
+                    exclude={player.cell},
+                    occupied=occupied_cells,
+                )
+                if target is not None:
+                    player.cell = target
+                    result = replace(result, relocated_to=target)
         return item, result
 
     def restart_game(self) -> List[Player]:

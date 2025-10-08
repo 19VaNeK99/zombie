@@ -161,16 +161,20 @@ async def apply_life_change(player: Player, amount: int) -> bool:
 
 async def handle_cell_item(player: Player) -> bool:
     """Применяет эффект предмета на текущей клетке (если есть)."""
-    resolved = logic.resolve_cell_item(player)
+    origin_cell = player.cell
+    resolved = logic.resolve_cell_item(
+        player,
+        occupied=logic.occupied_cells(exclude_player_id=player.id),
+    )
     if not resolved:
         return False
 
     item, result = resolved
-    payload = {"t": "item", "cell": player.cell, "item": item.item_type.value, "by": player.id}
+    payload = {"t": "item", "cell": origin_cell, "item": item.item_type.value, "by": player.id}
     await broadcast_json(payload)
 
     died = False
-    if result.affects_lives:
+    if result.affects_lives or result.relocated_to is not None:
         await broadcast_player_snapshot(player)
         if result.died:
             await broadcast_json({"t": "death", "id": player.id, "cell": player.cell})

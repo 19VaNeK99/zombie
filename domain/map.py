@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from typing import Dict, Iterable, Iterator, Optional, Sequence, Set, Tuple
 
 from .item import Item, ItemType
@@ -61,6 +62,13 @@ class GameMap:
         mid = self.size // 2
         return self.from_rc(mid, mid)
 
+    def _neighbors(self, cell: int) -> Iterable[int]:
+        r, c = self.to_rc(cell)
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.size and 0 <= nc < self.size:
+                yield self.from_rc(nr, nc)
+
     # ------------------------------------------------------------------
     # Items & revealed cells
     # ------------------------------------------------------------------
@@ -92,6 +100,29 @@ class GameMap:
 
     def place_item(self, cell: int, item: Item) -> None:
         self._items[cell] = item
+
+    def nearest_revealed_cell(
+        self,
+        start: int,
+        *,
+        exclude: Optional[Set[int]] = None,
+        occupied: Optional[Set[int]] = None,
+    ) -> Optional[int]:
+        exclude_set = set(exclude) if exclude else set()
+        occupied_set = set(occupied) if occupied else set()
+        visited: Set[int] = set()
+        queue = deque([start])
+        visited.add(start)
+
+        while queue:
+            cell = queue.popleft()
+            if cell in self._revealed and cell not in exclude_set and cell not in occupied_set:
+                return cell
+            for neighbor in self._neighbors(cell):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        return None
 
     # ------------------------------------------------------------------
     # Spawn helpers
