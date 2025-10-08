@@ -1,6 +1,7 @@
 import json
 import random
 import uuid
+from enum import Enum
 from typing import Dict, List, Optional, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -30,7 +31,27 @@ active_connections: List[WebSocket] = []
 players_by_ws: Dict[WebSocket, Player] = {}
 players_by_id: Dict[str, Player] = {}
 player_connections: Dict[str, WebSocket] = {}
-game_active: bool = False
+class GamePhase(str, Enum):
+    LOBBY = "lobby"
+    PLAYING = "playing"
+
+
+class GameState:
+    _instance: Optional["GameState"] = None
+
+    def __new__(cls) -> "GameState":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.active = False
+            cls._instance.phase = GamePhase.LOBBY
+        return cls._instance
+
+    def reset(self) -> None:
+        self.active = False
+        self.phase = GamePhase.LOBBY
+
+
+game_state = GameState()
 
 game_map = GameMap(GRID_SIZE, ITEM_COUNTS, rng=random)
 
@@ -77,7 +98,9 @@ async def send_full_state(player: Player) -> None:
             {"cell": cell, "item": item.item_type.value}
             for cell, item in game_map.iter_items()
         ],
-        "game_active": game_active,
+        "game_active": game_state.active,
+        "game_phase": game_state.phase.value,
+        "joinable": game_state.phase is GamePhase.LOBBY,
         "players": [p.to_public() for p in players_by_id.values()],
     }
     await send_json(ws, payload)
@@ -104,7 +127,13 @@ async def broadcast_players_list() -> None:
 
 async def broadcast_game_status(state: str, *, by: Optional[str] = None) -> None:
     """Сообщает всем о смене статуса игры."""
-    payload: Dict[str, object] = {"t": "game", "state": state, "active": game_active}
+    payload: Dict[str, object] = {
+        "t": "game",
+        "state": state,
+        "active": game_state.active,
+        "phase": game_state.phase.value,
+        "joinable": game_state.phase is GamePhase.LOBBY,
+    }
     if by is not None:
         payload["by"] = by
     await broadcast_json(payload)
@@ -161,8 +190,6 @@ def occupied_cells(*, except_ws: Optional[WebSocket] = None) -> Set[int]:
 
 async def restart_game(requester: Optional[Player] = None) -> None:
     """Полностью перезапускает игру: предметы, позиции, жизни."""
-    global game_active
-
     game_map.reset()
 
     occupied: Set[int] = set()
@@ -172,7 +199,7 @@ async def restart_game(requester: Optional[Player] = None) -> None:
         occupied.add(cell)
         game_map.mark_revealed(cell)
 
-    game_active = False
+    game_state.reset()
 
     for player in list(players_by_id.values()):
         ws = get_player_ws(player)
@@ -194,8 +221,19 @@ async def restart_game(requester: Optional[Player] = None) -> None:
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
-    global game_active
     await websocket.accept()
+    if game_state.phase is not GamePhase.LOBBY:
+        await send_json(
+            websocket,
+            {
+                "t": "error",
+                "code": "game_in_progress",
+                "reason": "game_already_started",
+            },
+        )
+        await websocket.close()
+        return
+
     if len(active_connections) >= MAX_CLIENTS:
         await websocket.send_text("Комната переполнена, соединение отклонено.")
         await websocket.close()
@@ -216,7 +254,7 @@ async def ws_endpoint(websocket: WebSocket):
     await broadcast_player_snapshot(player)
     await broadcast_players_list()
 
-    if game_active and player.alive:
+    if game_state.active and player.alive:
         await resolve_cell_item(player)
 
     try:
@@ -231,7 +269,7 @@ async def ws_endpoint(websocket: WebSocket):
             mtype = msg.get("t")
 
             if mtype == "move":
-                if not game_active:
+                if not game_state.active:
                     await notify_game_inactive(websocket)
                     continue
 
@@ -268,14 +306,14 @@ async def ws_endpoint(websocket: WebSocket):
                     await resolve_cell_item(player)
 
             elif mtype == "damage":
-                if not game_active:
+                if not game_state.active:
                     await notify_game_inactive(websocket)
                     continue
                 amount = int(msg.get("amount", 0))
                 await adjust_player_lives(player, amount)
 
             elif mtype == "pickup":
-                if not game_active:
+                if not game_state.active:
                     await notify_game_inactive(websocket)
                     continue
                 item = str(msg.get("item", "")).strip()
@@ -286,7 +324,7 @@ async def ws_endpoint(websocket: WebSocket):
                         await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
             elif mtype == "drop":
-                if not game_active:
+                if not game_state.active:
                     await notify_game_inactive(websocket)
                     continue
                 item = str(msg.get("item", "")).strip()
@@ -296,10 +334,11 @@ async def ws_endpoint(websocket: WebSocket):
                         await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
             elif mtype == "start":
-                if game_active:
+                if game_state.active:
                     await send_json(websocket, {"t": "error", "code": "already_started", "reason": "game_already_active"})
                     continue
-                game_active = True
+                game_state.active = True
+                game_state.phase = GamePhase.PLAYING
                 await broadcast_game_status("started", by=player.id)
                 for pl in list(players_by_id.values()):
                     await broadcast_player_snapshot(pl)
