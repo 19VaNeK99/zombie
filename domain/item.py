@@ -34,6 +34,7 @@ class ItemResolution:
     inventory_added: Optional[str] = None
     inventory_removed: Optional[str] = None
     died: bool = False
+    relocated_to: Optional[int] = None
 
     @property
     def affects_lives(self) -> bool:
