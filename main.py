@@ -13,6 +13,15 @@ MAX_CLIENTS = 5
 GRID_SIZE = 5
 BROADCAST_INTERVAL = 1
 
+# --- Генерация предметов на карте ---
+ITEM_COUNTS = {
+    "zombie": 3,
+    "medkit": 2,
+    "weapon": 2,
+}
+ZOMBIE_DAMAGE = 1
+MEDKIT_HEAL = 1
+
 # --- Новые параметры автосмерти/опасности ---
 HAZARD_ON_ENTER = True    # проверка опасности на входе в новую клетку
 HAZARD_PROB     = 0.25    # шанс срабатывания (25%)
@@ -91,6 +100,35 @@ active_connections: List[WebSocket] = []
 players_by_ws: Dict[WebSocket, Player] = {}
 players_by_id: Dict[str, Player] = {}
 revealed: Set[int] = set()  # общие открытые клетки
+items_on_map: Dict[int, str] = {}
+
+
+def generate_items() -> Dict[int, str]:
+    """Случайно распределяет предметы по клеткам."""
+    total_cells = GRID_SIZE * GRID_SIZE
+    available_cells = [cell for cell in range(1, total_cells + 1) if cell != center_cell()]
+    placements: Dict[int, str] = {}
+
+    for item, count in ITEM_COUNTS.items():
+        if count <= 0 or not available_cells:
+            continue
+
+        count = min(count, len(available_cells))
+        chosen = random.sample(available_cells, count)
+        for cell in chosen:
+            placements[cell] = item
+            available_cells.remove(cell)
+
+    return placements
+
+
+def reset_items() -> None:
+    """Пересоздаёт предметы на карте (вызывается при старте)."""
+    global items_on_map
+    items_on_map = generate_items()
+
+
+reset_items()
 
 # ===================== Бот-петля (опционально) =====================
 
@@ -170,6 +208,27 @@ async def apply_damage(player: "Player", amount: int) -> bool:
 
     return False
 
+
+async def resolve_cell_item(player: "Player") -> None:
+    """Применяет эффект предмета на текущей клетке (если есть)."""
+    cell = player.cell
+    item = items_on_map.pop(cell, None)
+    if not item:
+        return
+
+    payload = {"t": "item", "cell": cell, "item": item, "by": player.id}
+
+    if item == "zombie":
+        await broadcast_json(payload)
+        await apply_damage(player, ZOMBIE_DAMAGE)
+    elif item == "medkit":
+        await broadcast_json(payload)
+        await apply_damage(player, -MEDKIT_HEAL)
+    elif item == "weapon":
+        player.inventory.append("weapon")
+        await broadcast_json(payload)
+        await send_json(player.ws, {"t": "inventory", "items": player.inventory})
+
 def occupied_cells(except_ws: Optional[WebSocket] = None) -> Set[int]:
     """Набор занятых клеток всеми игроками; можно исключить одного."""
     occ = set()
@@ -232,10 +291,17 @@ async def ws_endpoint(websocket: WebSocket):
         "n": GRID_SIZE,
         "revealed": sorted(revealed),
         "player": player.to_public(),  # его собственные данные
+        "items": [
+            {"cell": cell, "item": item}
+            for cell, item in sorted(items_on_map.items())
+        ],
         # при желании можно добавить и всех остальных:
         # "players": [p.to_public() for p in players_by_id.values()]
     }
     await send_json(websocket, state)
+
+    if player.alive:
+        await resolve_cell_item(player)
 
     try:
         while True:
@@ -284,6 +350,9 @@ async def ws_endpoint(websocket: WebSocket):
                         died = await apply_damage(player, HAZARD_DAMAGE)
                         # Если умер — дальше ничего делать не нужно (ход уже завершён)
                         # Если выжил — тоже всё ок, состояние уже разослано.
+
+                if player.alive:
+                    await resolve_cell_item(player)
 
 
             # --------- (Опционально) урон/хил ---------
