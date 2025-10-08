@@ -1,8 +1,6 @@
-import asyncio
 import json
 import random
 import uuid
-from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,7 +10,6 @@ from domain import GameMap, ItemType, Player
 # ===================== Настройки =====================
 MAX_CLIENTS = 5
 GRID_SIZE = 5
-BROADCAST_INTERVAL = 1
 
 # --- Генерация предметов на карте ---
 ITEM_COUNTS: Dict[ItemType, int] = {
@@ -38,37 +35,9 @@ game_active: bool = False
 game_map = GameMap(GRID_SIZE, ITEM_COUNTS, rng=random)
 
 
-# ===================== Бот-петля (опционально) =====================
+# ===================== Приложение =====================
 
-async def broadcast_bot_loop():
-    """Пример «бота», который шлёт индекс клетки 1..N^2 по кругу строкой."""
-    idx = 1
-    while True:
-        await asyncio.sleep(BROADCAST_INTERVAL)
-        if not game_active:
-            continue
-        msg = str(idx)
-        idx = idx + 1 if idx < game_map.total_cells else 1
-        # Шлём всем — клиент может воспринимать это как движение бота
-        for ws in list(active_connections):
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                try:
-                    active_connections.remove(ws)
-                except ValueError:
-                    pass
-
-# ===================== Жизненный цикл приложения =====================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Запускаем «бота», если он нужен
-    asyncio.create_task(broadcast_bot_loop())
-    yield
-    # graceful shutdown при необходимости
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 # ===================== Отправка =====================
 
@@ -122,6 +91,14 @@ async def broadcast_player_snapshot(player: Player) -> None:
         "cell": player.cell,
         "lives": player.lives,
         "alive": player.alive,
+    })
+
+
+async def broadcast_players_list() -> None:
+    """Рассылает полный список игроков всем подключённым клиентам."""
+    await broadcast_json({
+        "t": "players",
+        "players": [p.to_public() for p in players_by_id.values()],
     })
 
 
@@ -208,6 +185,8 @@ async def restart_game(requester: Optional[Player] = None) -> None:
     for player in list(players_by_id.values()):
         await broadcast_player_snapshot(player)
 
+    await broadcast_players_list()
+
     await broadcast_game_status("ready", by=requester.id if requester else None)
 
 
@@ -235,6 +214,7 @@ async def ws_endpoint(websocket: WebSocket):
 
     await send_full_state(player)
     await broadcast_player_snapshot(player)
+    await broadcast_players_list()
 
     if game_active and player.alive:
         await resolve_cell_item(player)
@@ -337,3 +317,4 @@ async def ws_endpoint(websocket: WebSocket):
         if player is not None:
             players_by_id.pop(player.id, None)
             player_connections.pop(player.id, None)
+            await broadcast_players_list()
