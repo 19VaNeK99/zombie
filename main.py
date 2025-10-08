@@ -1,71 +1,60 @@
 import json
 import random
 import uuid
-from enum import Enum
 from typing import Dict, List, Optional, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from domain import GameMap, ItemType, Player
+from domain import ItemType, Player
+from game_logic import GameLogic, GamePhase
 
 # ===================== Настройки =====================
 MAX_CLIENTS = 5
 GRID_SIZE = 5
 
 # --- Генерация предметов на карте ---
-ITEM_COUNTS: Dict[ItemType, int] = {
+ITEM_COUNTS = {
     ItemType.ZOMBIE: 3,
     ItemType.MEDKIT: 2,
     ItemType.WEAPON: 2,
 }
 
 # --- Новые параметры автосмерти/опасности ---
-HAZARD_ON_ENTER = True    # проверка опасности на входе в новую клетку
-HAZARD_PROB = 0.25        # шанс срабатывания (25%)
-HAZARD_DAMAGE = 1         # урон при срабатывании
-# random.seed(42)         # при желании — зафиксировать сид для воспроизводимости
+HAZARD_ON_ENTER = True
+HAZARD_PROB = 0.25
+HAZARD_DAMAGE = 1
 
-# ===================== Глобальное состояние комнаты =====================
+# ===================== Глобальное состояние =====================
+
+logic = GameLogic(
+    GRID_SIZE,
+    ITEM_COUNTS,
+    hazard_on_enter=HAZARD_ON_ENTER,
+    hazard_prob=HAZARD_PROB,
+    hazard_damage=HAZARD_DAMAGE,
+    rng=random,
+)
 
 active_connections: List[WebSocket] = []
 players_by_ws: Dict[WebSocket, Player] = {}
-players_by_id: Dict[str, Player] = {}
 player_connections: Dict[str, WebSocket] = {}
-class GamePhase(str, Enum):
-    LOBBY = "lobby"
-    PLAYING = "playing"
-
-
-class GameState:
-    _instance: Optional["GameState"] = None
-
-    def __new__(cls) -> "GameState":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance.active = False
-            cls._instance.phase = GamePhase.LOBBY
-        return cls._instance
-
-    def reset(self) -> None:
-        self.active = False
-        self.phase = GamePhase.LOBBY
-
-
-game_state = GameState()
-
-game_map = GameMap(GRID_SIZE, ITEM_COUNTS, rng=random)
-
 
 # ===================== Приложение =====================
 
 app = FastAPI()
 
+
 # ===================== Отправка =====================
 
-async def send_json(ws: WebSocket, payload: Dict):
+async def send_json(ws: WebSocket, payload: Dict) -> None:
     await ws.send_text(json.dumps(payload, ensure_ascii=False))
 
-async def broadcast_json(payload: Dict):
+
+def get_player_ws(player: Player) -> Optional[WebSocket]:
+    return player_connections.get(player.id)
+
+
+async def broadcast_json(payload: Dict) -> None:
     txt = json.dumps(payload, ensure_ascii=False)
     for ws in list(active_connections):
         try:
@@ -76,8 +65,6 @@ async def broadcast_json(payload: Dict):
             except ValueError:
                 pass
 
-def get_player_ws(player: Player) -> Optional[WebSocket]:
-    return player_connections.get(player.id)
 
 async def notify_game_inactive(ws: WebSocket) -> None:
     await send_json(ws, {"t": "error", "code": "not_active", "reason": "game_not_active"})
@@ -91,38 +78,42 @@ async def send_full_state(player: Player) -> None:
 
     payload = {
         "t": "state",
-        "n": GRID_SIZE,
-        "revealed": list(game_map.revealed_snapshot()),
+        "n": logic.grid_size,
+        "revealed": list(logic.revealed_snapshot()),
         "player": player.to_public(),
         "items": [
             {"cell": cell, "item": item.item_type.value}
-            for cell, item in game_map.iter_items()
+            for cell, item in logic.iter_items()
         ],
-        "game_active": game_state.active,
-        "game_phase": game_state.phase.value,
-        "joinable": game_state.phase is GamePhase.LOBBY,
-        "players": [p.to_public() for p in players_by_id.values()],
+        "game_active": logic.state.active,
+        "game_phase": logic.state.phase.value,
+        "joinable": logic.state.phase is GamePhase.LOBBY,
+        "players": [p.to_public() for p in logic.list_players()],
     }
     await send_json(ws, payload)
 
 
 async def broadcast_player_snapshot(player: Player) -> None:
     """Шлёт всем актуальное состояние одного игрока."""
-    await broadcast_json({
-        "t": "player",
-        "id": player.id,
-        "cell": player.cell,
-        "lives": player.lives,
-        "alive": player.alive,
-    })
+    await broadcast_json(
+        {
+            "t": "player",
+            "id": player.id,
+            "cell": player.cell,
+            "lives": player.lives,
+            "alive": player.alive,
+        }
+    )
 
 
 async def broadcast_players_list() -> None:
     """Рассылает полный список игроков всем подключённым клиентам."""
-    await broadcast_json({
-        "t": "players",
-        "players": [p.to_public() for p in players_by_id.values()],
-    })
+    await broadcast_json(
+        {
+            "t": "players",
+            "players": [p.to_public() for p in logic.list_players()],
+        }
+    )
 
 
 async def broadcast_game_status(state: str, *, by: Optional[str] = None) -> None:
@@ -130,43 +121,34 @@ async def broadcast_game_status(state: str, *, by: Optional[str] = None) -> None
     payload: Dict[str, object] = {
         "t": "game",
         "state": state,
-        "active": game_state.active,
-        "phase": game_state.phase.value,
-        "joinable": game_state.phase is GamePhase.LOBBY,
+        "active": logic.state.active,
+        "phase": logic.state.phase.value,
+        "joinable": logic.state.phase is GamePhase.LOBBY,
     }
     if by is not None:
         payload["by"] = by
     await broadcast_json(payload)
 
 
-async def adjust_player_lives(player: Player, amount: int) -> bool:
-    """Применяет изменение жизней (>0 — урон, <0 — лечение)."""
-    if amount == 0:
-        return False
-
-    died = False
-    if amount > 0:
-        damage = player.apply_damage(amount)
-        died = damage > 0 and not player.alive
-    else:
-        player.heal(-amount)
-
+async def apply_life_change(player: Player, amount: int) -> bool:
+    """Применяет изменение жизней и сообщает об этом."""
+    died = logic.adjust_player_lives(player, amount)
     await broadcast_player_snapshot(player)
     if died:
         await broadcast_json({"t": "death", "id": player.id, "cell": player.cell})
     return died
 
 
-async def resolve_cell_item(player: Player) -> None:
+async def handle_cell_item(player: Player) -> None:
     """Применяет эффект предмета на текущей клетке (если есть)."""
-    item = game_map.take_item(player.cell)
-    if not item:
+    resolved = logic.resolve_cell_item(player)
+    if not resolved:
         return
 
+    item, result = resolved
     payload = {"t": "item", "cell": player.cell, "item": item.item_type.value, "by": player.id}
     await broadcast_json(payload)
 
-    result = item.apply(player)
     if result.affects_lives:
         await broadcast_player_snapshot(player)
         if result.died:
@@ -180,36 +162,27 @@ async def resolve_cell_item(player: Player) -> None:
 
 def occupied_cells(*, except_ws: Optional[WebSocket] = None) -> Set[int]:
     """Набор занятых клеток всеми игроками; можно исключить одного."""
-    occ: Set[int] = set()
-    for ws, player in players_by_ws.items():
-        if except_ws is not None and ws is except_ws:
-            continue
-        occ.add(player.cell)
-    return occ
+    exclude_player_id: Optional[str] = None
+    if except_ws is not None:
+        player = players_by_ws.get(except_ws)
+        if player is not None:
+            exclude_player_id = player.id
+    return logic.occupied_cells(exclude_player_id=exclude_player_id)
 
 
-async def restart_game(requester: Optional[Player] = None) -> None:
+async def perform_restart(requester: Optional[Player] = None) -> None:
     """Полностью перезапускает игру: предметы, позиции, жизни."""
-    game_map.reset()
+    players = logic.restart_game()
 
-    occupied: Set[int] = set()
-    for player in sorted(players_by_id.values(), key=lambda p: p.id):
-        cell = game_map.first_free_start_cell(occupied)
-        player.reset_for_new_game(cell=cell)
-        occupied.add(cell)
-        game_map.mark_revealed(cell)
-
-    game_state.reset()
-
-    for player in list(players_by_id.values()):
+    for player in players:
         ws = get_player_ws(player)
         if ws is not None:
             await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
-    for player in list(players_by_id.values()):
+    for player in players:
         await send_full_state(player)
 
-    for player in list(players_by_id.values()):
+    for player in players:
         await broadcast_player_snapshot(player)
 
     await broadcast_players_list()
@@ -219,10 +192,11 @@ async def restart_game(requester: Optional[Player] = None) -> None:
 
 # ===================== WebSocket =====================
 
+
 @app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
+async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    if game_state.phase is not GamePhase.LOBBY:
+    if logic.state.phase is not GamePhase.LOBBY:
         await send_json(
             websocket,
             {
@@ -242,20 +216,16 @@ async def ws_endpoint(websocket: WebSocket):
     active_connections.append(websocket)
 
     pid = uuid.uuid4().hex[:8]
-    start_cell = game_map.first_free_start_cell(occupied_cells())
-    player = Player(player_id=pid, cell=start_cell)
+    player = logic.add_player(pid)
     players_by_ws[websocket] = player
-    players_by_id[player.id] = player
     player_connections[player.id] = websocket
-
-    game_map.mark_revealed(start_cell)
 
     await send_full_state(player)
     await broadcast_player_snapshot(player)
     await broadcast_players_list()
 
-    if game_state.active and player.alive:
-        await resolve_cell_item(player)
+    if logic.state.active and player.alive:
+        await handle_cell_item(player)
 
     try:
         while True:
@@ -269,14 +239,14 @@ async def ws_endpoint(websocket: WebSocket):
             mtype = msg.get("t")
 
             if mtype == "move":
-                if not game_state.active:
+                if not logic.state.active:
                     await notify_game_inactive(websocket)
                     continue
 
                 dx = int(msg.get("dx", 0))
                 dy = int(msg.get("dy", 0))
 
-                target_cell = game_map.translate(player.cell, dx, dy)
+                target_cell = logic.translate_cell(player.cell, dx, dy)
                 move_result = player.attempt_move(
                     dx=dx,
                     dy=dy,
@@ -288,8 +258,8 @@ async def ws_endpoint(websocket: WebSocket):
                     await send_json(websocket, {"t": "error", "code": move_result.reason, "reason": move_result.reason})
                     continue
 
-                newly = []
-                if game_map.mark_revealed(player.cell):
+                newly: List[int] = []
+                if logic.mark_revealed(player.cell):
                     newly.append(player.cell)
 
                 await broadcast_player_snapshot(player)
@@ -297,23 +267,23 @@ async def ws_endpoint(websocket: WebSocket):
                 if newly:
                     await broadcast_json({"t": "reveal", "cells": newly})
 
-                    if HAZARD_ON_ENTER and random.random() < HAZARD_PROB and player.alive:
-                        died = await adjust_player_lives(player, HAZARD_DAMAGE)
+                    if player.alive and logic.should_trigger_hazard():
+                        died = await apply_life_change(player, logic.hazard_damage)
                         if died:
                             continue
 
                 if player.alive:
-                    await resolve_cell_item(player)
+                    await handle_cell_item(player)
 
             elif mtype == "damage":
-                if not game_state.active:
+                if not logic.state.active:
                     await notify_game_inactive(websocket)
                     continue
                 amount = int(msg.get("amount", 0))
-                await adjust_player_lives(player, amount)
+                await apply_life_change(player, amount)
 
             elif mtype == "pickup":
-                if not game_state.active:
+                if not logic.state.active:
                     await notify_game_inactive(websocket)
                     continue
                 item = str(msg.get("item", "")).strip()
@@ -324,7 +294,7 @@ async def ws_endpoint(websocket: WebSocket):
                         await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
             elif mtype == "drop":
-                if not game_state.active:
+                if not logic.state.active:
                     await notify_game_inactive(websocket)
                     continue
                 item = str(msg.get("item", "")).strip()
@@ -334,26 +304,25 @@ async def ws_endpoint(websocket: WebSocket):
                         await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
             elif mtype == "start":
-                if game_state.active:
+                if logic.state.active:
                     await send_json(websocket, {"t": "error", "code": "already_started", "reason": "game_already_active"})
                     continue
-                game_state.active = True
-                game_state.phase = GamePhase.PLAYING
+                logic.start_game()
                 await broadcast_game_status("started", by=player.id)
-                for pl in list(players_by_id.values()):
+                for pl in logic.list_players():
                     await broadcast_player_snapshot(pl)
-                for pl in list(players_by_id.values()):
+                for pl in logic.list_players():
                     if pl.alive:
-                        await resolve_cell_item(pl)
+                        await handle_cell_item(pl)
 
             elif mtype == "restart":
-                await restart_game(player)
+                await perform_restart(player)
 
     except WebSocketDisconnect:
         if websocket in active_connections:
             active_connections.remove(websocket)
-        player = players_by_ws.pop(websocket, None)
-        if player is not None:
-            players_by_id.pop(player.id, None)
-            player_connections.pop(player.id, None)
+        stored_player = players_by_ws.pop(websocket, None)
+        if stored_player is not None:
+            logic.remove_player(stored_player.id)
+            player_connections.pop(stored_player.id, None)
             await broadcast_players_list()
