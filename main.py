@@ -2,11 +2,12 @@ import asyncio
 import json
 import random
 import uuid
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Set, Tuple
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from contextlib import asynccontextmanager
+
+from domain import GameMap, ItemType, Player
 
 # ===================== Настройки =====================
 MAX_CLIENTS = 5
@@ -14,122 +15,28 @@ GRID_SIZE = 5
 BROADCAST_INTERVAL = 1
 
 # --- Генерация предметов на карте ---
-ITEM_COUNTS = {
-    "zombie": 3,
-    "medkit": 2,
-    "weapon": 2,
+ITEM_COUNTS: Dict[ItemType, int] = {
+    ItemType.ZOMBIE: 3,
+    ItemType.MEDKIT: 2,
+    ItemType.WEAPON: 2,
 }
-ZOMBIE_DAMAGE = 1
-MEDKIT_HEAL = 1
 
 # --- Новые параметры автосмерти/опасности ---
 HAZARD_ON_ENTER = True    # проверка опасности на входе в новую клетку
-HAZARD_PROB     = 0.25    # шанс срабатывания (25%)
-HAZARD_DAMAGE   = 1       # урон при срабатывании
+HAZARD_PROB = 0.25        # шанс срабатывания (25%)
+HAZARD_DAMAGE = 1         # урон при срабатывании
 # random.seed(42)         # при желании — зафиксировать сид для воспроизводимости
-
-# ===================== Утилиты сетки =====================
-
-def to_rc(cell: int) -> Tuple[int, int]:
-    """1..N^2 -> (r,c) 0-индексация, с защитой границ."""
-    n = GRID_SIZE
-    i = max(1, min(n * n, cell)) - 1
-    return i // n, i % n
-
-def from_rc(r: int, c: int) -> int:
-    """(r,c) -> 1..N^2 с защитой границ."""
-    n = GRID_SIZE
-    r = max(0, min(n - 1, r))
-    c = max(0, min(n - 1, c))
-    return r * n + c + 1
-
-def clamp_cell(cell: int) -> int:
-    return max(1, min(GRID_SIZE * GRID_SIZE, cell))
-
-def center_cell() -> int:
-    """Центр сетки: для нечётных размеров это настоящий центр, для чётных — одну из центральных."""
-    mid = GRID_SIZE // 2
-    return from_rc(mid, mid)
-
-# ===================== Модель игрока =====================
-
-@dataclass
-class Player:
-    id: str
-    ws: WebSocket
-    cell: int
-    lives: int = 3
-    inventory: List[str] = field(default_factory=list)
-
-    @property
-    def alive(self) -> bool:
-        return self.lives >= 1
-
-    def to_public(self) -> Dict:
-        """Что рассылаем клиентам: без ws и лишнего."""
-        return {
-            "id": self.id,
-            "cell": self.cell,
-            "lives": self.lives,
-            "alive": self.alive,
-            "inventory": list(self.inventory),
-        }
-
-    def try_move(self, dx: int, dy: int, occupied_without_self: Set[int]) -> Tuple[bool, Optional[str]]:
-        """
-        Пытается сдвинуть игрока на dx,dy.
-        Возвращает (ok, reason). reason = 'dead' | 'occupied' | None.
-        """
-        if not self.alive:
-            return False, "dead"
-
-        r, c = to_rc(self.cell)
-        r += dy
-        c += dx
-        target = from_rc(r, c)
-
-        if target in occupied_without_self:
-            return False, "occupied"
-
-        self.cell = target
-        return True, None
 
 # ===================== Глобальное состояние комнаты =====================
 
 active_connections: List[WebSocket] = []
 players_by_ws: Dict[WebSocket, Player] = {}
 players_by_id: Dict[str, Player] = {}
-revealed: Set[int] = set()  # общие открытые клетки
-items_on_map: Dict[int, str] = {}
+player_connections: Dict[str, WebSocket] = {}
 game_active: bool = False
 
+game_map = GameMap(GRID_SIZE, ITEM_COUNTS, rng=random)
 
-def generate_items() -> Dict[int, str]:
-    """Случайно распределяет предметы по клеткам."""
-    total_cells = GRID_SIZE * GRID_SIZE
-    available_cells = [cell for cell in range(1, total_cells + 1) if cell != center_cell()]
-    placements: Dict[int, str] = {}
-
-    for item, count in ITEM_COUNTS.items():
-        if count <= 0 or not available_cells:
-            continue
-
-        count = min(count, len(available_cells))
-        chosen = random.sample(available_cells, count)
-        for cell in chosen:
-            placements[cell] = item
-            available_cells.remove(cell)
-
-    return placements
-
-
-def reset_items() -> None:
-    """Пересоздаёт предметы на карте (вызывается при старте)."""
-    global items_on_map
-    items_on_map = generate_items()
-
-
-reset_items()
 
 # ===================== Бот-петля (опционально) =====================
 
@@ -141,7 +48,7 @@ async def broadcast_bot_loop():
         if not game_active:
             continue
         msg = str(idx)
-        idx = idx + 1 if idx < GRID_SIZE * GRID_SIZE else 1
+        idx = idx + 1 if idx < game_map.total_cells else 1
         # Шлём всем — клиент может воспринимать это как движение бота
         for ws in list(active_connections):
             try:
@@ -179,6 +86,8 @@ async def broadcast_json(payload: Dict):
             except ValueError:
                 pass
 
+def get_player_ws(player: Player) -> Optional[WebSocket]:
+    return player_connections.get(player.id)
 
 async def notify_game_inactive(ws: WebSocket) -> None:
     await send_json(ws, {"t": "error", "code": "not_active", "reason": "game_not_active"})
@@ -186,19 +95,23 @@ async def notify_game_inactive(ws: WebSocket) -> None:
 
 async def send_full_state(player: Player) -> None:
     """Отправляет игроку полный снимок состояния."""
+    ws = get_player_ws(player)
+    if ws is None:
+        return
+
     payload = {
         "t": "state",
         "n": GRID_SIZE,
-        "revealed": sorted(revealed),
+        "revealed": list(game_map.revealed_snapshot()),
         "player": player.to_public(),
         "items": [
-            {"cell": cell, "item": item}
-            for cell, item in sorted(items_on_map.items())
+            {"cell": cell, "item": item.item_type.value}
+            for cell, item in game_map.iter_items()
         ],
         "game_active": game_active,
         "players": [p.to_public() for p in players_by_id.values()],
     }
-    await send_json(player.ws, payload)
+    await send_json(ws, payload)
 
 
 async def broadcast_player_snapshot(player: Player) -> None:
@@ -220,120 +133,83 @@ async def broadcast_game_status(state: str, *, by: Optional[str] = None) -> None
     await broadcast_json(payload)
 
 
-async def restart_game(requester: Optional[Player] = None) -> None:
-    """Полностью перезапускает игру: предметы, позиции, жизни."""
-    global revealed, game_active
-
-    revealed.clear()
-    reset_items()
-
-    occupied: Set[int] = set()
-    for pl in sorted(players_by_id.values(), key=lambda x: x.id):
-        cell = first_free_start_cell(occupied_override=occupied)
-        pl.cell = cell
-        pl.lives = 3
-        pl.inventory.clear()
-        occupied.add(cell)
-        revealed.add(cell)
-
-    game_active = False
-
-    # Разослать актуальное состояние всем игрокам
-    for pl in list(players_by_id.values()):
-        await send_json(pl.ws, {"t": "inventory", "items": pl.inventory})
-
-    for pl in list(players_by_id.values()):
-        await send_full_state(pl)
-
-    for pl in list(players_by_id.values()):
-        await broadcast_player_snapshot(pl)
-
-    await broadcast_game_status("ready", by=requester.id if requester else None)
-
-# ===================== Вспомогалки =====================
-
-async def apply_damage(player: "Player", amount: int) -> bool:
-    """
-    Применяет урон (>0) или хил (<0). Возвращает died=True, если игрок умер в этот момент.
-    Тут же рассылаем обновлённое состояние игрока.
-    """
+async def adjust_player_lives(player: Player, amount: int) -> bool:
+    """Применяет изменение жизней (>0 — урон, <0 — лечение)."""
     if amount == 0:
         return False
 
+    died = False
     if amount > 0:
-        player.lives = max(0, player.lives - amount)
+        damage = player.apply_damage(amount)
+        died = damage > 0 and not player.alive
     else:
-        # Примерный максимум хп, можешь вынести в константу
-        player.lives = min(player.lives - amount, 9)
+        player.heal(-amount)
 
-    # Сообщаем всем новое состояние игрока
     await broadcast_player_snapshot(player)
-
-    if not player.alive:
-        # Умер прямо сейчас — рассылаем отдельное событие (для эффектов)
+    if died:
         await broadcast_json({"t": "death", "id": player.id, "cell": player.cell})
-        return True
-
-    return False
+    return died
 
 
-async def resolve_cell_item(player: "Player") -> None:
+async def resolve_cell_item(player: Player) -> None:
     """Применяет эффект предмета на текущей клетке (если есть)."""
-    cell = player.cell
-    item = items_on_map.pop(cell, None)
+    item = game_map.take_item(player.cell)
     if not item:
         return
 
-    payload = {"t": "item", "cell": cell, "item": item, "by": player.id}
+    payload = {"t": "item", "cell": player.cell, "item": item.item_type.value, "by": player.id}
+    await broadcast_json(payload)
 
-    if item == "zombie":
-        await broadcast_json(payload)
-        await apply_damage(player, ZOMBIE_DAMAGE)
-    elif item == "medkit":
-        await broadcast_json(payload)
-        await apply_damage(player, -MEDKIT_HEAL)
-    elif item == "weapon":
-        player.inventory.append("weapon")
-        await broadcast_json(payload)
-        await send_json(player.ws, {"t": "inventory", "items": player.inventory})
+    result = item.apply(player)
+    if result.affects_lives:
+        await broadcast_player_snapshot(player)
+        if result.died:
+            await broadcast_json({"t": "death", "id": player.id, "cell": player.cell})
 
-def occupied_cells(except_ws: Optional[WebSocket] = None) -> Set[int]:
+    if result.inventory_changed:
+        ws = get_player_ws(player)
+        if ws is not None:
+            await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
+
+
+def occupied_cells(*, except_ws: Optional[WebSocket] = None) -> Set[int]:
     """Набор занятых клеток всеми игроками; можно исключить одного."""
-    occ = set()
-    for ws, p in players_by_ws.items():
+    occ: Set[int] = set()
+    for ws, player in players_by_ws.items():
         if except_ws is not None and ws is except_ws:
             continue
-        occ.add(p.cell)
+        occ.add(player.cell)
     return occ
 
-def first_free_start_cell(occupied_override: Optional[Set[int]] = None) -> int:
-    """Ищем свободную стартовую клетку (центр, затем по спирали)."""
-    occ = set(occupied_override) if occupied_override is not None else occupied_cells()
 
-    # Начинаем с центра; если занят — ищем ближайшую свободную.
-    start = center_cell()
-    if start not in occ:
-        return start
+async def restart_game(requester: Optional[Player] = None) -> None:
+    """Полностью перезапускает игру: предметы, позиции, жизни."""
+    global game_active
 
-    # Простейший поиск по слоям вокруг центра
-    r0, c0 = to_rc(start)
-    for radius in range(1, GRID_SIZE):
-        for dr in range(-radius, radius + 1):
-            for dc in range(-radius, radius + 1):
-                r, c = r0 + dr, c0 + dc
-                if r < 0 or r >= GRID_SIZE or c < 0 or c >= GRID_SIZE:
-                    continue
-                cand = from_rc(r, c)
-                if cand not in occ:
-                    return cand
+    game_map.reset()
 
-    # На крайний случай
-    for i in range(1, GRID_SIZE * GRID_SIZE + 1):
-        if i not in occ:
-            return i
+    occupied: Set[int] = set()
+    for player in sorted(players_by_id.values(), key=lambda p: p.id):
+        cell = game_map.first_free_start_cell(occupied)
+        player.reset_for_new_game(cell=cell)
+        occupied.add(cell)
+        game_map.mark_revealed(cell)
 
-    # Если всё занято (не должно случиться при MAX_CLIENTS << N^2)
-    return center_cell()
+    game_active = False
+
+    for player in list(players_by_id.values()):
+        ws = get_player_ws(player)
+        if ws is not None:
+            await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
+
+    for player in list(players_by_id.values()):
+        await send_full_state(player)
+
+    for player in list(players_by_id.values()):
+        await broadcast_player_snapshot(player)
+
+    await broadcast_game_status("ready", by=requester.id if requester else None)
+
 
 # ===================== WebSocket =====================
 
@@ -346,22 +222,18 @@ async def ws_endpoint(websocket: WebSocket):
         await websocket.close()
         return
 
-    # Регистрируем игрока
     active_connections.append(websocket)
+
     pid = uuid.uuid4().hex[:8]
-    start_cell = first_free_start_cell()
-    player = Player(id=pid, ws=websocket, cell=start_cell, lives=3, inventory=[])
+    start_cell = game_map.first_free_start_cell(occupied_cells())
+    player = Player(player_id=pid, cell=start_cell)
     players_by_ws[websocket] = player
     players_by_id[player.id] = player
+    player_connections[player.id] = websocket
 
-    # Открываем стартовую клетку
-    if start_cell not in revealed:
-        revealed.add(start_cell)
+    game_map.mark_revealed(start_cell)
 
-    # Отправляем подключившемуся полное состояние
     await send_full_state(player)
-
-    # Сообщаем всем о новом игроке
     await broadcast_player_snapshot(player)
 
     if game_active and player.alive:
@@ -371,7 +243,6 @@ async def ws_endpoint(websocket: WebSocket):
         while True:
             raw = await websocket.receive_text()
 
-            # Пинги/строки игнорируем — ожидаем JSON
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -379,71 +250,70 @@ async def ws_endpoint(websocket: WebSocket):
 
             mtype = msg.get("t")
 
-            # --------- Ход игрока ---------
             if mtype == "move":
                 if not game_active:
                     await notify_game_inactive(websocket)
                     continue
+
                 dx = int(msg.get("dx", 0))
                 dy = int(msg.get("dy", 0))
 
-                occ = occupied_cells(except_ws=websocket)
-                ok, reason = player.try_move(dx, dy, occ)
+                target_cell = game_map.translate(player.cell, dx, dy)
+                move_result = player.attempt_move(
+                    dx=dx,
+                    dy=dy,
+                    target_cell=target_cell,
+                    occupied=occupied_cells(except_ws=websocket),
+                )
 
-                if not ok:
-                    await send_json(websocket, {"t": "error", "code": reason, "reason": reason})
+                if not move_result.success:
+                    await send_json(websocket, {"t": "error", "code": move_result.reason, "reason": move_result.reason})
                     continue
 
                 newly = []
-                if player.cell not in revealed:
-                    revealed.add(player.cell)
+                if game_map.mark_revealed(player.cell):
                     newly.append(player.cell)
 
-                # Сначала всем сообщим новую позицию (даже если сейчас умрёт — будет видно, куда шагнул)
                 await broadcast_player_snapshot(player)
 
-                # Открытие клетки — всем
                 if newly:
                     await broadcast_json({"t": "reveal", "cells": newly})
 
-                    # --- Новое: автосмерть/опасность на новой клетке ---
                     if HAZARD_ON_ENTER and random.random() < HAZARD_PROB and player.alive:
-                        died = await apply_damage(player, HAZARD_DAMAGE)
-                        # Если умер — дальше ничего делать не нужно (ход уже завершён)
-                        # Если выжил — тоже всё ок, состояние уже разослано.
+                        died = await adjust_player_lives(player, HAZARD_DAMAGE)
+                        if died:
+                            continue
 
                 if player.alive:
                     await resolve_cell_item(player)
 
-
-            # --------- (Опционально) урон/хил ---------
             elif mtype == "damage":
                 if not game_active:
                     await notify_game_inactive(websocket)
                     continue
                 amount = int(msg.get("amount", 0))
-                await apply_damage(player, amount)
+                await adjust_player_lives(player, amount)
 
-
-            # --------- (Опционально) инвентарь ---------
             elif mtype == "pickup":
                 if not game_active:
                     await notify_game_inactive(websocket)
                     continue
-                # пример: {"t":"pickup","item":"key"}
                 item = str(msg.get("item", "")).strip()
                 if item:
-                    player.inventory.append(item)
-                    await send_json(websocket, {"t": "inventory", "items": player.inventory})
+                    player.add_item(item)
+                    ws = get_player_ws(player)
+                    if ws is not None:
+                        await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
             elif mtype == "drop":
                 if not game_active:
                     await notify_game_inactive(websocket)
                     continue
                 item = str(msg.get("item", "")).strip()
-                if item in player.inventory:
-                    player.inventory.remove(item)
-                    await send_json(websocket, {"t": "inventory", "items": player.inventory})
+                if player.remove_item(item):
+                    ws = get_player_ws(player)
+                    if ws is not None:
+                        await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
 
             elif mtype == "start":
                 if game_active:
@@ -460,10 +330,10 @@ async def ws_endpoint(websocket: WebSocket):
             elif mtype == "restart":
                 await restart_game(player)
 
-            # можно расширять другими типами сообщений…
-
     except WebSocketDisconnect:
-        # Удаляем игрока
-        active_connections.remove(websocket)
-        players_by_id.pop(players_by_ws[websocket].id, None)
-        players_by_ws.pop(websocket, None)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+        player = players_by_ws.pop(websocket, None)
+        if player is not None:
+            players_by_id.pop(player.id, None)
+            player_connections.pop(player.id, None)
