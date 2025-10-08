@@ -101,6 +101,7 @@ players_by_ws: Dict[WebSocket, Player] = {}
 players_by_id: Dict[str, Player] = {}
 revealed: Set[int] = set()  # общие открытые клетки
 items_on_map: Dict[int, str] = {}
+game_active: bool = False
 
 
 def generate_items() -> Dict[int, str]:
@@ -137,6 +138,8 @@ async def broadcast_bot_loop():
     idx = 1
     while True:
         await asyncio.sleep(BROADCAST_INTERVAL)
+        if not game_active:
+            continue
         msg = str(idx)
         idx = idx + 1 if idx < GRID_SIZE * GRID_SIZE else 1
         # Шлём всем — клиент может воспринимать это как движение бота
@@ -176,6 +179,77 @@ async def broadcast_json(payload: Dict):
             except ValueError:
                 pass
 
+
+async def notify_game_inactive(ws: WebSocket) -> None:
+    await send_json(ws, {"t": "error", "code": "not_active", "reason": "game_not_active"})
+
+
+async def send_full_state(player: Player) -> None:
+    """Отправляет игроку полный снимок состояния."""
+    payload = {
+        "t": "state",
+        "n": GRID_SIZE,
+        "revealed": sorted(revealed),
+        "player": player.to_public(),
+        "items": [
+            {"cell": cell, "item": item}
+            for cell, item in sorted(items_on_map.items())
+        ],
+        "game_active": game_active,
+        "players": [p.to_public() for p in players_by_id.values()],
+    }
+    await send_json(player.ws, payload)
+
+
+async def broadcast_player_snapshot(player: Player) -> None:
+    """Шлёт всем актуальное состояние одного игрока."""
+    await broadcast_json({
+        "t": "player",
+        "id": player.id,
+        "cell": player.cell,
+        "lives": player.lives,
+        "alive": player.alive,
+    })
+
+
+async def broadcast_game_status(state: str, *, by: Optional[str] = None) -> None:
+    """Сообщает всем о смене статуса игры."""
+    payload: Dict[str, object] = {"t": "game", "state": state, "active": game_active}
+    if by is not None:
+        payload["by"] = by
+    await broadcast_json(payload)
+
+
+async def restart_game(requester: Optional[Player] = None) -> None:
+    """Полностью перезапускает игру: предметы, позиции, жизни."""
+    global revealed, game_active
+
+    revealed.clear()
+    reset_items()
+
+    occupied: Set[int] = set()
+    for pl in sorted(players_by_id.values(), key=lambda x: x.id):
+        cell = first_free_start_cell(occupied_override=occupied)
+        pl.cell = cell
+        pl.lives = 3
+        pl.inventory.clear()
+        occupied.add(cell)
+        revealed.add(cell)
+
+    game_active = False
+
+    # Разослать актуальное состояние всем игрокам
+    for pl in list(players_by_id.values()):
+        await send_json(pl.ws, {"t": "inventory", "items": pl.inventory})
+
+    for pl in list(players_by_id.values()):
+        await send_full_state(pl)
+
+    for pl in list(players_by_id.values()):
+        await broadcast_player_snapshot(pl)
+
+    await broadcast_game_status("ready", by=requester.id if requester else None)
+
 # ===================== Вспомогалки =====================
 
 async def apply_damage(player: "Player", amount: int) -> bool:
@@ -193,13 +267,7 @@ async def apply_damage(player: "Player", amount: int) -> bool:
         player.lives = min(player.lives - amount, 9)
 
     # Сообщаем всем новое состояние игрока
-    await broadcast_json({
-        "t": "player",
-        "id": player.id,
-        "cell": player.cell,
-        "lives": player.lives,
-        "alive": player.alive,
-    })
+    await broadcast_player_snapshot(player)
 
     if not player.alive:
         # Умер прямо сейчас — рассылаем отдельное событие (для эффектов)
@@ -238,11 +306,13 @@ def occupied_cells(except_ws: Optional[WebSocket] = None) -> Set[int]:
         occ.add(p.cell)
     return occ
 
-def first_free_start_cell() -> int:
+def first_free_start_cell(occupied_override: Optional[Set[int]] = None) -> int:
     """Ищем свободную стартовую клетку (центр, затем по спирали)."""
+    occ = set(occupied_override) if occupied_override is not None else occupied_cells()
+
     # Начинаем с центра; если занят — ищем ближайшую свободную.
     start = center_cell()
-    if start not in occupied_cells():
+    if start not in occ:
         return start
 
     # Простейший поиск по слоям вокруг центра
@@ -254,12 +324,14 @@ def first_free_start_cell() -> int:
                 if r < 0 or r >= GRID_SIZE or c < 0 or c >= GRID_SIZE:
                     continue
                 cand = from_rc(r, c)
-                if cand not in occupied_cells():
+                if cand not in occ:
                     return cand
+
     # На крайний случай
     for i in range(1, GRID_SIZE * GRID_SIZE + 1):
-        if i not in occupied_cells():
+        if i not in occ:
             return i
+
     # Если всё занято (не должно случиться при MAX_CLIENTS << N^2)
     return center_cell()
 
@@ -267,6 +339,7 @@ def first_free_start_cell() -> int:
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
+    global game_active
     await websocket.accept()
     if len(active_connections) >= MAX_CLIENTS:
         await websocket.send_text("Комната переполнена, соединение отклонено.")
@@ -286,21 +359,12 @@ async def ws_endpoint(websocket: WebSocket):
         revealed.add(start_cell)
 
     # Отправляем подключившемуся полное состояние
-    state = {
-        "t": "state",
-        "n": GRID_SIZE,
-        "revealed": sorted(revealed),
-        "player": player.to_public(),  # его собственные данные
-        "items": [
-            {"cell": cell, "item": item}
-            for cell, item in sorted(items_on_map.items())
-        ],
-        # при желании можно добавить и всех остальных:
-        # "players": [p.to_public() for p in players_by_id.values()]
-    }
-    await send_json(websocket, state)
+    await send_full_state(player)
 
-    if player.alive:
+    # Сообщаем всем о новом игроке
+    await broadcast_player_snapshot(player)
+
+    if game_active and player.alive:
         await resolve_cell_item(player)
 
     try:
@@ -317,6 +381,9 @@ async def ws_endpoint(websocket: WebSocket):
 
             # --------- Ход игрока ---------
             if mtype == "move":
+                if not game_active:
+                    await notify_game_inactive(websocket)
+                    continue
                 dx = int(msg.get("dx", 0))
                 dy = int(msg.get("dy", 0))
 
@@ -333,13 +400,7 @@ async def ws_endpoint(websocket: WebSocket):
                     newly.append(player.cell)
 
                 # Сначала всем сообщим новую позицию (даже если сейчас умрёт — будет видно, куда шагнул)
-                await broadcast_json({
-                    "t": "player",
-                    "id": player.id,
-                    "cell": player.cell,
-                    "lives": player.lives,
-                    "alive": player.alive
-                })
+                await broadcast_player_snapshot(player)
 
                 # Открытие клетки — всем
                 if newly:
@@ -357,12 +418,18 @@ async def ws_endpoint(websocket: WebSocket):
 
             # --------- (Опционально) урон/хил ---------
             elif mtype == "damage":
+                if not game_active:
+                    await notify_game_inactive(websocket)
+                    continue
                 amount = int(msg.get("amount", 0))
                 await apply_damage(player, amount)
 
 
             # --------- (Опционально) инвентарь ---------
             elif mtype == "pickup":
+                if not game_active:
+                    await notify_game_inactive(websocket)
+                    continue
                 # пример: {"t":"pickup","item":"key"}
                 item = str(msg.get("item", "")).strip()
                 if item:
@@ -370,10 +437,28 @@ async def ws_endpoint(websocket: WebSocket):
                     await send_json(websocket, {"t": "inventory", "items": player.inventory})
 
             elif mtype == "drop":
+                if not game_active:
+                    await notify_game_inactive(websocket)
+                    continue
                 item = str(msg.get("item", "")).strip()
                 if item in player.inventory:
                     player.inventory.remove(item)
                     await send_json(websocket, {"t": "inventory", "items": player.inventory})
+
+            elif mtype == "start":
+                if game_active:
+                    await send_json(websocket, {"t": "error", "code": "already_started", "reason": "game_already_active"})
+                    continue
+                game_active = True
+                await broadcast_game_status("started", by=player.id)
+                for pl in list(players_by_id.values()):
+                    await broadcast_player_snapshot(pl)
+                for pl in list(players_by_id.values()):
+                    if pl.alive:
+                        await resolve_cell_item(pl)
+
+            elif mtype == "restart":
+                await restart_game(player)
 
             # можно расширять другими типами сообщений…
 
