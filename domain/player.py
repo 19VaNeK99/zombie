@@ -23,6 +23,7 @@ class Player:
         self.cell = cell
         self.lives = lives if lives is not None else self.START_LIVES
         self._inventory: List[str] = list(inventory or [])
+        self.finished = False
 
     # ------------------------------------------------------------------
     # State helpers
@@ -45,15 +46,27 @@ class Player:
         self.cell = cell
         self.lives = lives if lives is not None else self.START_LIVES
         self._inventory.clear()
+        self.finished = False
 
     # ------------------------------------------------------------------
     # Movement
     # ------------------------------------------------------------------
-    def attempt_move(self, *, dx: int, dy: int, target_cell: int, occupied: Set[int]) -> MoveResult:
+    def attempt_move(
+        self,
+        *,
+        dx: int,
+        dy: int,
+        target_cell: int,
+        occupied: Set[int],
+        shared_cells: Optional[Set[int]] = None,
+    ) -> MoveResult:
+        if self.finished:
+            return MoveResult(success=False, reason="finished")
+
         if not self.alive:
             return MoveResult(success=False, reason="dead")
 
-        if target_cell in occupied:
+        if target_cell in occupied and (shared_cells is None or target_cell not in shared_cells):
             return MoveResult(success=False, reason="occupied")
 
         self.cell = target_cell
@@ -103,5 +116,6 @@ class Player:
             "cell": self.cell,
             "lives": self.lives,
             "alive": self.alive,
+            "finished": self.finished,
             "inventory": self.inventory_snapshot(),
         }

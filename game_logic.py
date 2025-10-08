@@ -51,6 +51,23 @@ class GameLogic:
         self.game_map = GameMap(grid_size, item_counts, rng=rng)
         self.players: Dict[str, Player] = {}
 
+    # ------------------------------------------------------------------
+    # Special cells
+    # ------------------------------------------------------------------
+    @property
+    def spawn_cell(self) -> int:
+        return self.game_map.spawn_cell()
+
+    @property
+    def finish_cell(self) -> int:
+        return self.game_map.finish_cell()
+
+    def is_spawn_cell(self, cell: int) -> bool:
+        return cell == self.spawn_cell
+
+    def is_finish_cell(self, cell: int) -> bool:
+        return cell == self.finish_cell
+
     def list_players(self) -> List[Player]:
         return list(self.players.values())
 
@@ -73,7 +90,8 @@ class GameLogic:
         for pid, player in self.players.items():
             if exclude_player_id is not None and pid == exclude_player_id:
                 continue
-            occupied.add(player.cell)
+            if not player.finished:
+                occupied.add(player.cell)
         return occupied
 
     def translate_cell(self, cell: int, dx: int, dy: int) -> int:
@@ -128,6 +146,29 @@ class GameLogic:
     def start_game(self) -> None:
         self.state.active = True
         self.state.phase = GamePhase.PLAYING
+
+    def mark_player_finished(self, player: Player) -> bool:
+        if player.finished:
+            return False
+        player.finished = True
+        return True
+
+    def all_players_resolved(self) -> bool:
+        if not self.players:
+            return False
+        for player in self.players.values():
+            if player.alive and not player.finished:
+                return False
+        return True
+
+    def finalize_if_complete(self) -> bool:
+        if not self.state.active:
+            return False
+        if not self.all_players_resolved():
+            return False
+        self.state.active = False
+        self.state.phase = GamePhase.LOBBY
+        return True
 
 
 __all__ = ["GameLogic", "GamePhase", "GameState"]

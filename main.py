@@ -79,6 +79,8 @@ async def send_full_state(player: Player) -> None:
     payload = {
         "t": "state",
         "n": logic.grid_size,
+        "spawn": logic.spawn_cell,
+        "finish": logic.finish_cell,
         "revealed": list(logic.revealed_snapshot()),
         "player": player.to_public(),
         "items": [
@@ -102,6 +104,7 @@ async def broadcast_player_snapshot(player: Player) -> None:
             "cell": player.cell,
             "lives": player.lives,
             "alive": player.alive,
+            "finished": player.finished,
         }
     )
 
@@ -130,6 +133,15 @@ async def broadcast_game_status(state: str, *, by: Optional[str] = None) -> None
     await broadcast_json(payload)
 
 
+async def broadcast_player_finish(player: Player) -> None:
+    await broadcast_json({"t": "finish", "id": player.id, "cell": player.cell})
+
+
+async def finalize_game_if_needed(*, trigger: Optional[Player] = None) -> None:
+    if logic.finalize_if_complete():
+        await broadcast_game_status("completed", by=trigger.id if trigger else None)
+
+
 async def apply_life_change(player: Player, amount: int) -> bool:
     """Применяет изменение жизней и сообщает об этом."""
     died = logic.adjust_player_lives(player, amount)
@@ -139,25 +151,29 @@ async def apply_life_change(player: Player, amount: int) -> bool:
     return died
 
 
-async def handle_cell_item(player: Player) -> None:
+async def handle_cell_item(player: Player) -> bool:
     """Применяет эффект предмета на текущей клетке (если есть)."""
     resolved = logic.resolve_cell_item(player)
     if not resolved:
-        return
+        return False
 
     item, result = resolved
     payload = {"t": "item", "cell": player.cell, "item": item.item_type.value, "by": player.id}
     await broadcast_json(payload)
 
+    died = False
     if result.affects_lives:
         await broadcast_player_snapshot(player)
         if result.died:
             await broadcast_json({"t": "death", "id": player.id, "cell": player.cell})
+            died = True
 
     if result.inventory_changed:
         ws = get_player_ws(player)
         if ws is not None:
             await send_json(ws, {"t": "inventory", "items": player.inventory_snapshot()})
+
+    return died
 
 
 def occupied_cells(*, except_ws: Optional[WebSocket] = None) -> Set[int]:
@@ -225,7 +241,12 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     await broadcast_players_list()
 
     if logic.state.active and player.alive:
-        await handle_cell_item(player)
+        died = await handle_cell_item(player)
+        if died:
+            await finalize_game_if_needed(trigger=player)
+        elif player.finished:
+            await broadcast_players_list()
+            await broadcast_player_finish(player)
 
     try:
         while True:
@@ -252,6 +273,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     dy=dy,
                     target_cell=target_cell,
                     occupied=occupied_cells(except_ws=websocket),
+                    shared_cells={logic.spawn_cell},
                 )
 
                 if not move_result.success:
@@ -262,6 +284,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 if logic.mark_revealed(player.cell):
                     newly.append(player.cell)
 
+                finished_now = False
+                if logic.is_finish_cell(player.cell):
+                    finished_now = logic.mark_player_finished(player)
+
                 await broadcast_player_snapshot(player)
 
                 if newly:
@@ -270,17 +296,33 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     if player.alive and logic.should_trigger_hazard():
                         died = await apply_life_change(player, logic.hazard_damage)
                         if died:
+                            await finalize_game_if_needed(trigger=player)
                             continue
 
                 if player.alive:
-                    await handle_cell_item(player)
+                    if finished_now:
+                        await broadcast_player_finish(player)
+                        await broadcast_players_list()
+                        await finalize_game_if_needed(trigger=player)
+                        continue
+                    died_from_item = await handle_cell_item(player)
+                    if died_from_item:
+                        await finalize_game_if_needed(trigger=player)
+                        continue
+                    if player.finished:
+                        await broadcast_players_list()
+                        await broadcast_player_finish(player)
+                        await finalize_game_if_needed(trigger=player)
+                        continue
 
             elif mtype == "damage":
                 if not logic.state.active:
                     await notify_game_inactive(websocket)
                     continue
                 amount = int(msg.get("amount", 0))
-                await apply_life_change(player, amount)
+                died = await apply_life_change(player, amount)
+                if died:
+                    await finalize_game_if_needed(trigger=player)
 
             elif mtype == "pickup":
                 if not logic.state.active:
@@ -313,7 +355,13 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     await broadcast_player_snapshot(pl)
                 for pl in logic.list_players():
                     if pl.alive:
-                        await handle_cell_item(pl)
+                        died_from_item = await handle_cell_item(pl)
+                        if died_from_item:
+                            await finalize_game_if_needed(trigger=pl)
+                        elif pl.finished:
+                            await broadcast_players_list()
+                            await broadcast_player_finish(pl)
+                await finalize_game_if_needed(trigger=player)
 
             elif mtype == "restart":
                 await perform_restart(player)
