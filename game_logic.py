@@ -20,11 +20,19 @@ class GameState:
             cls._instance = super().__new__(cls)
             cls._instance.active = False
             cls._instance.phase = GamePhase.LOBBY
+            cls._instance.turn_order = []
+            cls._instance.current_turn_index = -1
+            cls._instance.current_turn_player_id: Optional[str] = None
+            cls._instance.steps_remaining = 0
         return cls._instance
 
     def reset(self) -> None:
         self.active = False
         self.phase = GamePhase.LOBBY
+        self.turn_order = []
+        self.current_turn_index = -1
+        self.current_turn_player_id = None
+        self.steps_remaining = 0
 
 
 class GameLogic:
@@ -80,6 +88,8 @@ class GameLogic:
 
     def remove_player(self, player_id: str) -> Optional[Player]:
         player = self.players.pop(player_id, None)
+        if player is not None:
+            self.handle_player_inactive(player)
         return player
 
     def get_player(self, player_id: str) -> Optional[Player]:
@@ -146,6 +156,90 @@ class GameLogic:
     def start_game(self) -> None:
         self.state.active = True
         self.state.phase = GamePhase.PLAYING
+        self.state.turn_order = []
+        self.state.current_turn_index = -1
+        self.state.current_turn_player_id = None
+        self.state.steps_remaining = 0
+
+    # ------------------------------------------------------------------
+    # Turn management
+    # ------------------------------------------------------------------
+    def roll_turn_length(self) -> int:
+        return int(self.rng.randint(1, 4))
+
+    def start_turn_cycle(self) -> Optional[Player]:
+        self.state.turn_order = [
+            player.id for player in self.players.values() if player.alive and not player.finished
+        ]
+        self.state.current_turn_index = -1
+        self.state.current_turn_player_id = None
+        self.state.steps_remaining = 0
+        if not self.state.turn_order:
+            return None
+        return self._advance_to_next_turn()
+
+    def _advance_to_next_turn(self) -> Optional[Player]:
+        if not self.state.turn_order:
+            self.state.current_turn_index = -1
+            self.state.current_turn_player_id = None
+            self.state.steps_remaining = 0
+            return None
+
+        for _ in range(len(self.state.turn_order)):
+            self.state.current_turn_index = (self.state.current_turn_index + 1) % len(self.state.turn_order)
+            player_id = self.state.turn_order[self.state.current_turn_index]
+            player = self.players.get(player_id)
+            if player and player.alive and not player.finished:
+                self.state.current_turn_player_id = player_id
+                self.state.steps_remaining = self.roll_turn_length()
+                return player
+
+        self.state.current_turn_index = -1
+        self.state.current_turn_player_id = None
+        self.state.steps_remaining = 0
+        return None
+
+    def consume_step(self, player: Player, *, force_end: bool = False, spend: bool = True) -> Optional[Player]:
+        if self.state.current_turn_player_id != player.id:
+            return None
+
+        if spend and self.state.steps_remaining > 0:
+            self.state.steps_remaining -= 1
+
+        if force_end:
+            self.state.steps_remaining = 0
+
+        if self.state.steps_remaining <= 0:
+            return self._advance_to_next_turn()
+
+        return player
+
+    def is_player_turn(self, player: Player) -> bool:
+        return self.state.current_turn_player_id == player.id
+
+    def handle_player_inactive(self, player: Player) -> None:
+        player_id = player.id
+        if player_id not in self.state.turn_order:
+            return
+
+        idx = self.state.turn_order.index(player_id)
+        self.state.turn_order.pop(idx)
+
+        if idx < self.state.current_turn_index:
+            self.state.current_turn_index -= 1
+        elif idx == self.state.current_turn_index:
+            self.state.current_turn_index -= 1
+            self.state.current_turn_player_id = None
+            self.state.steps_remaining = 0
+            if self.state.active:
+                self._advance_to_next_turn()
+
+    def turn_snapshot(self) -> Dict[str, object]:
+        return {
+            "current": self.state.current_turn_player_id,
+            "remaining": self.state.steps_remaining,
+            "order": list(self.state.turn_order),
+        }
 
     def mark_player_finished(self, player: Player) -> bool:
         if player.finished:
@@ -168,6 +262,10 @@ class GameLogic:
             return False
         self.state.active = False
         self.state.phase = GamePhase.LOBBY
+        self.state.turn_order = []
+        self.state.current_turn_index = -1
+        self.state.current_turn_player_id = None
+        self.state.steps_remaining = 0
         return True
 
 
