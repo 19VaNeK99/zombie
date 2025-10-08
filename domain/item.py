@@ -32,6 +32,7 @@ class ItemResolution:
     damage: int = 0
     healed: int = 0
     inventory_added: Optional[str] = None
+    inventory_removed: Optional[str] = None
     died: bool = False
 
     @property
@@ -40,7 +41,7 @@ class ItemResolution:
 
     @property
     def inventory_changed(self) -> bool:
-        return bool(self.inventory_added)
+        return bool(self.inventory_added or self.inventory_removed)
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,8 @@ class Item:
 
     def apply(self, player: Player) -> ItemResolution:
         if self.item_type is ItemType.ZOMBIE:
+            if player.remove_item("weapon"):
+                return ItemResolution(inventory_removed="weapon", died=not player.alive)
             damage = player.apply_damage(ZOMBIE_DAMAGE)
             return ItemResolution(damage=damage, died=not player.alive)
         if self.item_type is ItemType.MEDKIT:
