@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using TMPro;
@@ -7,24 +8,50 @@ using NativeWebSocket;
 // ---- модели сообщений ----
 [System.Serializable] public class MoveMsg { public string t = "move"; public int dx; public int dy; }
 [System.Serializable] public class CommandMsg { public string t; }
-[System.Serializable] public class PlayerStateMsg { public string t; public int cell; }
+[System.Serializable] public class PlayerStateMsg
+{
+    public string t;
+    public string id;
+    public int cell;
+    public int lives;
+    public bool alive;
+    public bool finished;
+}
 [System.Serializable] public class RevealMsg { public string t; public int[] cells; }
+[System.Serializable] public class InventoryMsg { public string t; public string[] items; }
+[System.Serializable] public class PlayerPublicMsg
+{
+    public string id;
+    public int cell;
+    public int lives;
+    public bool alive;
+    public bool finished;
+    public string[] inventory;
+}
 [System.Serializable] public class StateMsg
 {
     public string t;
     public int n;               // размер поля
     public int[] revealed;      // открытые клетки
-    public PlayerStateMsg player;
+    public PlayerPublicMsg player;
 }
 
 public class NetClient : MonoBehaviour
 {
     [SerializeField] private string serverUrl = "ws://127.0.0.1:8000/ws";
     [SerializeField] private TextMeshProUGUI timerText;
+    [SerializeField] private TextMeshProUGUI inventoryText;
     [SerializeField] private BoardUIDynamic board;   // динамическая доска
 
     private WebSocket ws;
     private readonly ConcurrentQueue<string> _inbox = new();
+
+    private readonly (string key, string label)[] _knownInventoryItems =
+    {
+        ("weapon", "Оружие"),
+        ("key", "Ключ"),
+        ("fuel", "Топливо"),
+    };
 
     // --- подключение ---
     private async void Start()
@@ -94,7 +121,10 @@ public class NetClient : MonoBehaviour
                     if (st.revealed != null && st.revealed.Length > 0)
                         board.RevealCells(st.revealed);
                     if (st.player != null)
+                    {
                         board.MovePlayerToCell(st.player.cell);
+                        UpdateInventoryDisplay(st.player.inventory);
+                    }
                     continue;
                 }
 
@@ -113,12 +143,61 @@ public class NetClient : MonoBehaviour
                     board.RevealCells(rv.cells);
                     continue;
                 }
+
+                // инвентарь игрока
+                var inv = JsonUtility.FromJson<InventoryMsg>(msg);
+                if (inv != null && inv.t == "inventory")
+                {
+                    UpdateInventoryDisplay(inv.items);
+                    continue;
+                }
             }
 
             // иначе — число бота
             if (int.TryParse(msg, out var cell))
                 board.MoveBotToCell(cell);
         }
+    }
+
+    private void UpdateInventoryDisplay(IList<string> items)
+    {
+        if (inventoryText == null) return;
+
+        var counts = new Dictionary<string, int>();
+        if (items != null)
+        {
+            foreach (var item in items)
+            {
+                if (string.IsNullOrEmpty(item)) continue;
+                if (!counts.ContainsKey(item)) counts[item] = 0;
+                counts[item]++;
+            }
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Инвентарь:");
+
+        foreach (var (key, label) in _knownInventoryItems)
+        {
+            counts.TryGetValue(key, out var value);
+            counts.Remove(key);
+            sb.Append("• ")
+              .Append(label)
+              .Append(": ")
+              .Append(value)
+              .AppendLine();
+        }
+
+        foreach (var pair in counts)
+        {
+            sb.Append("• ")
+              .Append(pair.Key)
+              .Append(": ")
+              .Append(pair.Value)
+              .AppendLine();
+        }
+
+        inventoryText.text = sb.ToString().TrimEnd('\n');
     }
 
     private async void OnApplicationQuit()
