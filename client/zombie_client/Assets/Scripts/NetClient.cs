@@ -6,6 +6,7 @@ using NativeWebSocket;
 
 // ---- модели сообщений ----
 [System.Serializable] public class MoveMsg { public string t = "move"; public int dx; public int dy; }
+[System.Serializable] public class CommandMsg { public string t; }
 [System.Serializable] public class PlayerStateMsg { public string t; public int cell; }
 [System.Serializable] public class RevealMsg { public string t; public int[] cells; }
 [System.Serializable] public class StateMsg
@@ -57,6 +58,20 @@ public class NetClient : MonoBehaviour
         var json = JsonUtility.ToJson(new MoveMsg { dx = dx, dy = dy });
         await ws.SendText(json);
         Debug.Log($"Sent move: {json}");
+    }
+
+    public void SendStartCommand() => SendCommand("start");
+
+    public void SendRestartCommand() => SendCommand("restart");
+
+    private async void SendCommand(string commandType)
+    {
+        if (string.IsNullOrEmpty(commandType)) return;
+        if (ws == null || ws.State != WebSocketState.Open) return;
+
+        var json = JsonUtility.ToJson(new CommandMsg { t = commandType });
+        await ws.SendText(json);
+        Debug.Log($"Sent command: {json}");
     }
 
     // --- обработка входящих ---
