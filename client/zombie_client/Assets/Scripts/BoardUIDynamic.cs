@@ -13,7 +13,6 @@ public class BoardUIDynamic : MonoBehaviour
     [SerializeField] private Color coverColor = new(0f,0f,0f,0.55f); // цвет «крышки»
 
     [Header("Tokens")]
-    [SerializeField] private RectTransform botToken;
     [SerializeField] private RectTransform playerToken;
     [SerializeField] private Vector2 tokenSize = new(80,80);
 
@@ -21,7 +20,7 @@ public class BoardUIDynamic : MonoBehaviour
     private readonly List<Image> _covers = new();              // полупрозрачные крышки над клетками
     private GridLayoutGroup _grid;
     private RectTransform _rt;
-    private int _playerCell=1, _botCell=1;
+    private int _playerCell = 1;
 
     private void Awake()
     {
@@ -34,9 +33,7 @@ public class BoardUIDynamic : MonoBehaviour
         BuildGrid(gridSize);
 
         _playerCell = Mathf.Clamp((gridSize*gridSize+1)/2,1,gridSize*gridSize);
-        _botCell = 1;
         MoveTokenToCell(playerToken, _playerCell);
-        MoveTokenToCell(botToken, _botCell);
     }
 
     // -------- API --------
@@ -47,12 +44,9 @@ public class BoardUIDynamic : MonoBehaviour
         gridSize = n;
         BuildGrid(n);
         _playerCell = Mathf.Clamp(_playerCell,1,n*n);
-        _botCell = Mathf.Clamp(_botCell,1,n*n);
         MoveTokenToCell(playerToken,_playerCell);
-        MoveTokenToCell(botToken,_botCell);
     }
 
-    public void MoveBotToCell(int idx1)    { _botCell    = ClampIndex(idx1);    MoveTokenToCell(botToken,_botCell); }
     public void MovePlayerToCell(int idx1) { _playerCell = ClampIndex(idx1);    MoveTokenToCell(playerToken,_playerCell); }
 
     public void RevealCell(int idx1)
@@ -109,7 +103,6 @@ public class BoardUIDynamic : MonoBehaviour
             _covers.Add(coverImg);
         }
 
-        botToken?.SetAsLastSibling();
         playerToken?.SetAsLastSibling();
     }
 

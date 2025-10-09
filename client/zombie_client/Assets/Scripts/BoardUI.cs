@@ -4,11 +4,9 @@ using UnityEngine;
 public class BoardUI : MonoBehaviour
 {
     [Header("Tokens")]
-    [SerializeField] private RectTransform botToken;     // фишка бота (с сервера)
     [SerializeField] private RectTransform playerToken;  // фишка игрока (локально)
 
     private readonly List<RectTransform> _cells = new(); // Cell1..Cell9 (по порядку)
-    private int _botCell = 5;      // текущее положение бота (1..9)
     private int _playerCell = 5;   // текущее положение игрока (1..9)
 
     private void Awake()
@@ -20,7 +18,7 @@ public class BoardUI : MonoBehaviour
             if (child == null) continue;
 
             // собираем только клетки (исключаем токены, если они уже лежат внутри Board)
-            if (child == botToken || child == playerToken) continue;
+            if (child == playerToken) continue;
             _cells.Add(child);
         }
 
@@ -28,19 +26,10 @@ public class BoardUI : MonoBehaviour
             Debug.LogWarning($"BoardUI: найдено {_cells.Count} клеток, ожидается 9.");
 
         // стартовые позиции по центру (клетка 5)
-        MoveTokenToCell(botToken, _botCell);
         MoveTokenToCell(playerToken, _playerCell);
     }
 
     // ========== Публичные методы ==========
-
-    /// <summary>Движение бота по номеру клетки 1..9 (из сервера).</summary>
-    public void MoveBotToCell(int cellNumber)
-    {
-        _botCell = ClampCell(cellNumber);
-        MoveTokenToCell(botToken, _botCell);
-    }
-
     /// <summary>Переместить игрока в конкретную клетку 1..9 (если захочешь клики).</summary>
     public void MovePlayerToCell(int cellNumber)
     {
