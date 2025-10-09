@@ -6,8 +6,8 @@ public class PlayerInput : MonoBehaviour
 {
     [SerializeField] private NetClient net;  // ← ссылка на NetClient
 
-    [SerializeField] private Rect startButtonRect = new Rect(16f, 16f, 160f, 36f);
-    [SerializeField] private Rect restartButtonRect = new Rect(16f, 60f, 160f, 36f);
+    [SerializeField] private Vector2 buttonSize = new Vector2(160f, 36f);
+    [SerializeField] private float buttonMargin = 16f;
 
     private void Update()
     {
@@ -29,8 +29,22 @@ public class PlayerInput : MonoBehaviour
     {
         if (net == null) return;
 
+        var topRightX = Screen.width - buttonSize.x - buttonMargin;
+
+        var startButtonRect = new Rect(
+            topRightX,
+            buttonMargin,
+            buttonSize.x,
+            buttonSize.y);
+
         if (GUI.Button(startButtonRect, "Start (G)"))
             net.SendStartCommand();
+
+        var restartButtonRect = new Rect(
+            topRightX,
+            buttonMargin + buttonSize.y + buttonMargin,
+            buttonSize.x,
+            buttonSize.y);
 
         if (GUI.Button(restartButtonRect, "Restart (P)"))
             net.SendRestartCommand();
