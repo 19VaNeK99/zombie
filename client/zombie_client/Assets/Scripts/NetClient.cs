@@ -120,6 +120,7 @@ public class NetClient : MonoBehaviour
                 if (st != null && st.t == "state")
                 {
                     if (st.n > 0) board.SetSize(st.n);
+                    board.HideAllCovers();
                     if (st.revealed != null && st.revealed.Length > 0)
                         board.RevealCells(st.revealed);
                     if (st.player != null)
