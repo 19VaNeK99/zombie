@@ -149,7 +149,8 @@ class GameLogic:
         *,
         occupied: Optional[Set[int]] = None,
     ) -> Optional[Tuple[Item, ItemResolution]]:
-        item = self.game_map.take_item(player.cell)
+        original_cell = player.cell
+        item = self.game_map.take_item(original_cell)
         if not item:
             return None
         result = item.apply(player)
@@ -164,6 +165,9 @@ class GameLogic:
                 if target is not None:
                     player.cell = target
                     result = replace(result, relocated_to=target)
+            zombie_defeated = bool(result.inventory_removed) or result.died
+            if not zombie_defeated:
+                self.game_map.place_item(original_cell, item)
         return item, result
 
     def restart_game(self) -> List[Player]:
