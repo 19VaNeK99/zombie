@@ -52,6 +52,8 @@ public class NetClient : MonoBehaviour
         ("key", "Ключ"),
         ("fuel", "Топливо"),
     };
+    private readonly List<string> _latestInventoryItems = new();
+    private int? _playerLives;
 
     // --- подключение ---
     private async void Start()
@@ -123,6 +125,7 @@ public class NetClient : MonoBehaviour
                     if (st.player != null)
                     {
                         board.MovePlayerToCell(st.player.cell);
+                        _playerLives = st.player.lives;
                         UpdateInventoryDisplay(st.player.inventory);
                     }
                     continue;
@@ -133,6 +136,8 @@ public class NetClient : MonoBehaviour
                 if (p != null && p.t == "player")
                 {
                     board.MovePlayerToCell(p.cell);
+                    _playerLives = p.lives;
+                    UpdateInventoryDisplay();
                     continue;
                 }
 
@@ -159,23 +164,36 @@ public class NetClient : MonoBehaviour
         }
     }
 
-    private void UpdateInventoryDisplay(IList<string> items)
+    private void UpdateInventoryDisplay(IList<string> items = null)
     {
         if (inventoryText == null) return;
 
-        var counts = new Dictionary<string, int>();
         if (items != null)
         {
+            _latestInventoryItems.Clear();
             foreach (var item in items)
             {
                 if (string.IsNullOrEmpty(item)) continue;
-                if (!counts.ContainsKey(item)) counts[item] = 0;
-                counts[item]++;
+                _latestInventoryItems.Add(item);
             }
+        }
+
+        var counts = new Dictionary<string, int>();
+        foreach (var item in _latestInventoryItems)
+        {
+            if (!counts.ContainsKey(item)) counts[item] = 0;
+            counts[item]++;
         }
 
         var sb = new StringBuilder();
         sb.AppendLine("Инвентарь:");
+
+        if (_playerLives.HasValue)
+        {
+            sb.Append("• Жизни: ")
+              .Append(_playerLives.Value)
+              .AppendLine();
+        }
 
         foreach (var (key, label) in _knownInventoryItems)
         {
