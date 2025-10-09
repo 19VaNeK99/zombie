@@ -159,9 +159,6 @@ public class NetClient : MonoBehaviour
                 }
             }
 
-            // иначе — число бота
-            if (int.TryParse(msg, out var cell))
-                board.MoveBotToCell(cell);
         }
     }
 
